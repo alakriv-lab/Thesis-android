@@ -11,8 +11,8 @@ from flet.matplotlib_chart import MatplotlibChart
 # API URL & CONFIGURATION
 # ---------------------------------------------------------------------------
 
-BASE_URL = "http://10.51.65.163:8001"
-WS_URL = "ws://10.51.65.163:8001/ws/crypto-stream"
+BASE_URL = "https://thesis-w4mq.onrender.com"
+WS_URL = "wss://thesis-w4mq.onrender.com/ws/crypto-stream"
 
 
 # ---------------------------------------------------------------------------
