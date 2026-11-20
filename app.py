@@ -1,4 +1,5 @@
 import os
+import time
 import math
 import json
 import joblib
@@ -90,8 +91,7 @@ class FixedTransformerModel(nn.Module):
         super(FixedTransformerModel, self).__init__()
         self.input_projection = nn.Linear(input_dim, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=64, dropout=0.1,
-                                                   batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=64, dropout=0.1, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.fc = nn.Linear(d_model, output_dim)
 
@@ -137,16 +137,13 @@ class AdvancedNLPEngine:
 
     def classify_topic_bertopic(self, title: str) -> dict:
         text = title.lower()
-        if any(w in text for w in
-               ['sec', 'etf', 'lawsuit', 'approval', 'ban', 'regulation', 'court', 'legal', 'settlement']):
+        if any(w in text for w in ['sec', 'etf', 'lawsuit', 'approval', 'ban', 'regulation', 'court', 'legal', 'settlement']):
             topic_id = 0
         elif any(w in text for w in ['fed', 'interest', 'inflation', 'powell', 'rates', 'macro', 'economy']):
             topic_id = 1
-        elif any(w in text for w in
-                 ['upgrade', 'dencun', 'hardfork', 'staking', 'layer-2', 'gas', 'developer', 'mainnet', 'node']):
+        elif any(w in text for w in ['upgrade', 'dencun', 'hardfork', 'staking', 'layer-2', 'gas', 'developer', 'mainnet', 'node']):
             topic_id = 2
-        elif any(w in text for w in
-                 ['binance', 'coinbase', 'crash', 'bankruptcy', 'volume', 'rally', 'surge', 'plunge', 'bull', 'bear']):
+        elif any(w in text for w in ['binance', 'coinbase', 'crash', 'bankruptcy', 'volume', 'rally', 'surge', 'plunge', 'bull', 'bear']):
             topic_id = 3
         else:
             topic_id = -1
@@ -169,6 +166,13 @@ live_ticker_store = {
 }
 
 connected_clients = set()
+
+# Cache ιστορικών κεριών για live υπολογισμό τεχνικών δεικτών (EMA, RSI, MACD)
+history_cache = {
+    "btc_df": None,
+    "eth_df": None,
+    "last_fetched": 0.0
+}
 
 
 async def binance_websocket_listener():
@@ -241,8 +245,100 @@ print("[✔] Scalers, Transformer (#1) και LSTM (#2) φορτώθηκαν ε�
 
 
 # ==========================================
-# 6. HELPER FUNCTIONS
+# 6. HELPER FUNCTIONS & LIVE INDICATORS
 # ==========================================
+def get_cached_historical_data():
+    now = time.time()
+    if history_cache["btc_df"] is None or history_cache["eth_df"] is None or (now - history_cache["last_fetched"]) > 300:
+        try:
+            btc_hist = yf.Ticker("BTC-USD").history(period="90d", interval="1d")
+            eth_hist = yf.Ticker("ETH-USD").history(period="90d", interval="1d")
+            if len(btc_hist) >= 30 and len(eth_hist) >= 30:
+                history_cache["btc_df"] = btc_hist[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                history_cache["eth_df"] = eth_hist[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                history_cache["last_fetched"] = now
+        except Exception as e:
+            print(f"[!] Warning fetching 90d history: {e}")
+    return history_cache["btc_df"], history_cache["eth_df"]
+
+
+def compute_asset_indicators(df: pd.DataFrame, live_close: float, live_change: float):
+    df = df.copy()
+    df.iloc[-1, df.columns.get_loc('Close')] = live_close
+    df.iloc[-1, df.columns.get_loc('High')] = max(float(df['High'].iloc[-1]), live_close)
+    df.iloc[-1, df.columns.get_loc('Low')] = min(float(df['Low'].iloc[-1]), live_close)
+
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume'].replace(0, np.nan).ffill().fillna(15000000000.0)
+
+    ema7 = close.ewm(span=7, adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    sma20 = close.rolling(window=20, min_periods=1).mean()
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/14, min_periods=1, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, min_periods=1, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi14 = (100.0 - (100.0 / (1.0 + rs))).fillna(50.0)
+
+    change_pct = close.pct_change().fillna(0.0) * 100.0
+    change_pct.iloc[-1] = live_change
+    volatility_pct = (((high - low) / close.replace(0, np.nan)) * 100.0).fillna(2.5)
+
+    return pd.DataFrame({
+        'close': close.values,
+        'volume': volume.values,
+        'change': change_pct.values,
+        'volatility': volatility_pct.values,
+        'ema7': ema7.values,
+        'ema21': ema21.values,
+        'ema50': ema50.values,
+        'sma20': sma20.values,
+        'macd': macd.values,
+        'macd_signal': macd_signal.values,
+        'rsi14': rsi14.values
+    })
+
+
+def build_live_sequence_features(btc_close, btc_change, eth_close, eth_change, fng_val, sentiment_score=0.15, seq_len=14):
+    btc_df, eth_df = get_cached_historical_data()
+    if btc_df is not None and eth_df is not None:
+        common_len = min(len(btc_df), len(eth_df))
+        if common_len >= seq_len:
+            btc_ind = compute_asset_indicators(btc_df.iloc[-common_len:], btc_close, btc_change).iloc[-seq_len:]
+            eth_ind = compute_asset_indicators(eth_df.iloc[-common_len:], eth_close, eth_change).iloc[-seq_len:]
+
+            rows = []
+            for i in range(seq_len):
+                b = btc_ind.iloc[i]
+                e = eth_ind.iloc[i]
+                rows.append([
+                    b['close'], b['volume'], b['change'], b['volatility'],
+                    e['close'], e['volume'], e['change'], e['volatility'],
+                    float(fng_val), float(sentiment_score),
+                    b['ema7'], b['ema21'], b['ema50'], b['sma20'], b['macd'], b['macd_signal'], b['rsi14'],
+                    e['ema7'], e['ema21'], e['ema50'], e['sma20'], e['macd'], e['macd_signal'], e['rsi14']
+                ])
+            return np.array(rows, dtype=np.float64)
+
+    # Fallback αν αποτύχει προσωρινά το yfinance
+    return np.array([[
+        btc_close, 40000000000.0, btc_change, 2.5,
+        eth_close, 15000000000.0, eth_change, 3.0,
+        fng_val, sentiment_score,
+        btc_close, btc_close, btc_close, btc_close, 0.0, 0.0, 50.0,
+        eth_close, eth_close, eth_close, eth_close, 0.0, 0.0, 50.0
+    ]], dtype=np.float64)
+
+
 def convert_log_return_to_usd(scaled_preds, btc_current, eth_current):
     if scaler_y_btc is None or scaler_y_eth is None:
         return round(btc_current, 2), round(eth_current, 2)
@@ -262,13 +358,13 @@ def format_time_ago(timestamp):
     if diff <= 0:
         return "Just now"
     if diff < 3600:
-        mins = int(max(1, diff // 60))
+        mins = int(max(1, diff / 60))
         return f"{mins} mins ago" if mins > 1 else "1 min ago"
     elif diff < 86400:
-        hours = int(diff // 3600)
+        hours = int(diff / 3600)
         return f"{hours} hours ago" if hours > 1 else "1 hour ago"
     else:
-        days = int(diff // 86400)
+        days = int(diff / 86400)
         return f"{days} days ago" if days > 1 else "1 day ago"
 
 
@@ -295,15 +391,14 @@ def simulated_sentiment_analysis(title):
         return score, "Bearish 🔴", f"-{impact:.2f}%", "#ef4444"
     else:
         impact = max(0.01, abs(score) * 0.8)
-        return score, "Neutral 🟡", f"{impact:+.2f}%", "#62677d"
+        return score, "Neutral 🟡", f"+{impact:.2f}%", "#62677d"
 
 
 # ==========================================
 # 7. FASTAPI APP & ENDPOINTS
 # ==========================================
-app = FastAPI(title="Crypto AI Live Pipeline API with Ensemble Forecasting", version="7.0")
+app = FastAPI(title="Crypto AI Live Pipeline API with Ensemble Forecasting", version="7.1")
 
-# Ενεργοποίηση CORS για αποδοχή αιτημάτων από το Flet app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -377,7 +472,7 @@ def get_live_metrics():
                 "fear_greed_index": fng_val,
                 "fear_greed_class": fng_class,
                 "finbert_sentiment_score": 0.15,
-                "extracted_entities": "Bitcoin, Ethereum, SEC, Market Volatility"
+                "extracted_entities": ["Bitcoin", "Ethereum", "SEC", "Market Volatility"]
             }
         }
     except Exception as e:
@@ -395,57 +490,64 @@ def predict_live():
     eth_close = metrics['ethereum']['close_price']
     eth_change = metrics['ethereum']['change_pct']
     fng_val = metrics['market_sentiment']['fear_greed_index']
+    sentiment_score = metrics['market_sentiment']['finbert_sentiment_score']
 
-    raw_features = np.array([[
-        btc_close, 40000000000.0, btc_change, 2.5,
-        eth_close, 15000000000.0, eth_change, 3.0,
-        fng_val, 0.15,
-        btc_close, btc_close, btc_close, btc_close, 0.0, 0.0, 50.0,
-        eth_close, eth_close, eth_close, eth_close, 0.0, 0.0, 50.0
-    ]])
+    # Δημιουργία πραγματικής ακολουθίας 14 ημερών με live τεχνικούς δείκτες
+    raw_seq = build_live_sequence_features(
+        btc_close, btc_change, eth_close, eth_change, fng_val, sentiment_score, seq_len=14
+    )
 
-    scaled_X = scaler_X.transform(raw_features)
-    input_tensor = torch.tensor(scaled_X, dtype=torch.float32)
+    scaled_X = scaler_X.transform(raw_seq)
+    input_tensor = torch.tensor(scaled_X, dtype=torch.float32).unsqueeze(0)  # (1, seq_len, 24)
 
-    # 1. Transformer Model (#1 Weight: 60%)
+    # 1. Transformer Model (#1 Weight 60%)
     with torch.no_grad():
         trans_pred_scaled = transformer_model(input_tensor).numpy()
-    trans_btc_target, trans_eth_target = convert_log_return_to_usd(trans_pred_scaled, btc_close, eth_close)
 
-    # 2. Advanced LSTM Model (#2 Weight: 40%)
+    # 2. Advanced LSTM Model (#2 Weight 40%)
     with torch.no_grad():
         lstm_pred_scaled = lstm_model(input_tensor).numpy()
-    lstm_btc_target, lstm_eth_target = convert_log_return_to_usd(lstm_pred_scaled, btc_close, eth_close)
 
-    # 3. ENSEMBLE FORECASTING (WEIGHTED AVERAGE: 60% Trans + 40% LSTM)
+    # 3. ENSEMBLE FORECASTING (Συνδυασμός 60/40 στο SCALED επίπεδο ΠΡΙΝ το Inverse Transform)
     w_trans, w_lstm = 0.60, 0.40
-    ens_btc_target = round(w_trans * trans_btc_target + w_lstm * lstm_btc_target, 2)
-    ens_eth_target = round(w_trans * trans_eth_target + w_lstm * lstm_eth_target, 2)
+    ens_pred_scaled = (w_trans * trans_pred_scaled) + (w_lstm * lstm_pred_scaled)
 
-    # Signal & Confidence calculation
-    trans_btc_bull = trans_btc_target > btc_close
-    lstm_btc_bull = lstm_btc_target > btc_close
-    if trans_btc_bull and lstm_btc_bull:
+    # Μετατροπή όλων σε ρεαλιστικές τιμές (USD)
+    trans_btc_target, trans_eth_target = convert_log_return_to_usd(trans_pred_scaled, btc_close, eth_close)
+    lstm_btc_target, lstm_eth_target = convert_log_return_to_usd(lstm_pred_scaled, btc_close, eth_close)
+    ens_btc_target, ens_eth_target = convert_log_return_to_usd(ens_pred_scaled, btc_close, eth_close)
+
+    # --- 4. ΔΥΝΑΜΙΚΟΣ ΥΠΟΛΟΓΙΣΜΟΣ SIGNALS & CONFIDENCE (BTC) ---
+    btc_diff_pct = (ens_btc_target - btc_close) / btc_close
+
+    if btc_diff_pct > 0.002:
         ens_btc_signal = "STRONG BUY 🟢🟢"
-        ens_btc_conf = 94.5
-    elif not trans_btc_bull and not lstm_btc_bull:
+    elif btc_diff_pct < -0.002:
         ens_btc_signal = "STRONG SELL 🔴🔴"
-        ens_btc_conf = 92.0
     else:
-        ens_btc_signal = "NEUTRAL / MODERATE 🟡"
-        ens_btc_conf = 61.5
+        ens_btc_signal = "HOLD / NEUTRAL 🟡"
 
-    trans_eth_bull = trans_eth_target > eth_close
-    lstm_eth_bull = lstm_eth_target > eth_close
-    if trans_eth_bull and lstm_eth_bull:
-        ens_eth_signal = "STRONG BUY 🟢🟢"
-        ens_eth_conf = 93.8
-    elif not trans_eth_bull and not lstm_eth_bull:
-        ens_eth_signal = "STRONG SELL 🔴🔴"
-        ens_eth_conf = 91.2
+    if (trans_btc_target > btc_close and lstm_btc_target > btc_close) or (trans_btc_target < btc_close and lstm_btc_target < btc_close):
+        ens_btc_conf = 75.0 + min(abs(btc_diff_pct * 500), 20.0)
     else:
-        ens_eth_signal = "NEUTRAL / MODERATE 🟡"
-        ens_eth_conf = 59.0
+        ens_btc_conf = 45.0 + min(abs(btc_diff_pct * 300), 15.0)
+    ens_btc_conf = round(ens_btc_conf, 1)
+
+    # --- 5. ΔΥΝΑΜΙΚΟΣ ΥΠΟΛΟΓΙΣΜΟΣ SIGNALS & CONFIDENCE (ETH) ---
+    eth_diff_pct = (ens_eth_target - eth_close) / eth_close
+
+    if eth_diff_pct > 0.002:
+        ens_eth_signal = "STRONG BUY 🟢🟢"
+    elif eth_diff_pct < -0.002:
+        ens_eth_signal = "STRONG SELL 🔴🔴"
+    else:
+        ens_eth_signal = "HOLD / NEUTRAL 🟡"
+
+    if (trans_eth_target > eth_close and lstm_eth_target > eth_close) or (trans_eth_target < eth_close and lstm_eth_target < eth_close):
+        ens_eth_conf = 75.0 + min(abs(eth_diff_pct * 500), 20.0)
+    else:
+        ens_eth_conf = 45.0 + min(abs(eth_diff_pct * 300), 15.0)
+    ens_eth_conf = round(ens_eth_conf, 1)
 
     return {
         "status": "Success",
@@ -453,15 +555,15 @@ def predict_live():
         "predictions": {
             "transformer_attention": {
                 "BTC_target": trans_btc_target,
-                "BTC_signal": "BUY 🟢" if trans_btc_bull else "SELL 🔴",
+                "BTC_signal": "BUY 🟢" if trans_btc_target > btc_close else "SELL 🔴",
                 "ETH_target": trans_eth_target,
-                "ETH_signal": "BUY 🟢" if trans_eth_bull else "SELL 🔴"
+                "ETH_signal": "BUY 🟢" if trans_eth_target > eth_close else "SELL 🔴"
             },
             "lstm_deep_learning": {
                 "BTC_target": lstm_btc_target,
-                "BTC_signal": "BUY 🟢" if lstm_btc_bull else "SELL 🔴",
+                "BTC_signal": "BUY 🟢" if lstm_btc_target > btc_close else "SELL 🔴",
                 "ETH_target": lstm_eth_target,
-                "ETH_signal": "BUY 🟢" if lstm_eth_bull else "SELL 🔴"
+                "ETH_signal": "BUY 🟢" if lstm_eth_target > eth_close else "SELL 🔴"
             },
             "ensemble_consensus": {
                 "BTC_target": ens_btc_target,
@@ -502,8 +604,7 @@ def get_live_news_feed():
     day_indices = [3, 5, 7, 9]
 
     try:
-        res_btc = requests.get("https://min-api.cryptocompare.com/data/v2/news/?categories=BTC&lang=EN",
-                               headers=headers, timeout=5)
+        res_btc = requests.get("https://min-api.cryptocompare.com/data/v2/news/?categories=BTC&lang=EN", headers=headers, timeout=5)
         if res_btc.status_code == 200:
             for idx, item in enumerate(res_btc.json().get("Data", [])[:4]):
                 title = item.get("title", "")
@@ -530,8 +631,7 @@ def get_live_news_feed():
                     "chart_day_index": day_indices[idx % len(day_indices)]
                 })
 
-        res_eth = requests.get("https://min-api.cryptocompare.com/data/v2/news/?categories=ETH&lang=EN",
-                               headers=headers, timeout=5)
+        res_eth = requests.get("https://min-api.cryptocompare.com/data/v2/news/?categories=ETH&lang=EN", headers=headers, timeout=5)
         if res_eth.status_code == 200:
             for idx, item in enumerate(res_eth.json().get("Data", [])[:4]):
                 title = item.get("title", "")
@@ -652,4 +752,4 @@ def get_live_news_feed():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8001))
-    uvicorn.run("app:app", host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
