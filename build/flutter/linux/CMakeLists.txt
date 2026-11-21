@@ -4,10 +4,10 @@ project(runner LANGUAGES CXX)
 
 # The name of the application target. The on-disk name is set as OUTPUT_NAME to keep
 # Flutter tooling behavior intact.
-set(BINARY_NAME "crypto_thesis_project_android")
+set(BINARY_NAME "cryptoai")
 # The unique GTK application identifier for this application. See:
 # https://wiki.gnome.org/HowDoI/ChooseApplicationID
-set(APPLICATION_ID "com.flet.crypto-thesis-project-android")
+set(APPLICATION_ID "com.alakriv.cryptoai.cryptoai")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -86,7 +86,7 @@ add_dependencies(${BINARY_NAME} flutter_assemble)
 # the default top-level location.
 set_target_properties(${BINARY_NAME}
   PROPERTIES
-  OUTPUT_NAME "Crypto_thesis_project android"
+  OUTPUT_NAME "CryptoAI"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/intermediates_do_not_run"
 )
 

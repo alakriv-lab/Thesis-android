@@ -1,11 +1,78 @@
+import base64
+import builtins
+import io
+import os
+import sys
+import zipfile
+import tempfile
 import asyncio
 import json
 import requests
+
+# Εξαγωγή του matplotlib/mpl-data από το sitepackages.zip (Android Flet fix)
+_mpl_cache = os.path.join(tempfile.gettempdir(), "mpl_data_extracted")
+os.makedirs(_mpl_cache, exist_ok=True)
+_mpl_data_dir = None
+
+_search_paths = [str(p) for p in sys.path] + os.environ.get("PYTHONPATH", "").split(os.pathsep)
+for _entry in _search_paths:
+    _zip_path = _entry.split(".zip")[0] + ".zip" if ".zip" in _entry else _entry
+    if _zip_path.endswith(".zip") and os.path.isfile(_zip_path):
+        try:
+            with zipfile.ZipFile(_zip_path, "r") as _zf:
+                _mpl_members = [m for m in _zf.namelist() if m.startswith("matplotlib/mpl-data/")]
+                if _mpl_members:
+                    _target_dir = os.path.join(_mpl_cache, "matplotlib", "mpl-data")
+                    _target_rc = os.path.join(_target_dir, "matplotlibrc")
+                    if not os.path.isfile(_target_rc):
+                        _zf.extractall(_mpl_cache, members=_mpl_members)
+                    _mpl_data_dir = _target_dir
+                    os.environ["MPLCONFIGDIR"] = _target_dir
+                    os.environ["MATPLOTLIBRC"] = _target_rc
+                    os.environ["MATPLOTLIBDATA"] = _target_dir
+                    break
+        except Exception:
+            pass
+
+if _mpl_data_dir:
+    _orig_open = builtins.open
+
+    def _patched_open(file, *args, **kwargs):
+        try:
+            _path_str = os.fspath(file)
+            if isinstance(_path_str, str) and ".zip/matplotlib/mpl-data" in _path_str.replace("\\", "/"):
+                _rel = _path_str.replace("\\", "/").split(".zip/matplotlib/mpl-data", 1)[1].lstrip("/")
+                file = os.path.join(_mpl_data_dir, _rel) if _rel else _mpl_data_dir
+        except TypeError:
+            pass
+        return _orig_open(file, *args, **kwargs)
+
+    builtins.open = _patched_open
+    io.open = _patched_open
+
 import matplotlib
+if _mpl_data_dir:
+    matplotlib.get_data_path = lambda: _mpl_data_dir
+
 matplotlib.use('Agg')  # Non-interactive backend για αποφυγή GUI collisions
 import matplotlib.pyplot as plt
 import flet as ft
-from flet.matplotlib_chart import MatplotlibChart
+
+
+# ---------------------------------------------------------------------------
+# FLET VERSION COMPATIBILITY HELPERS
+# ---------------------------------------------------------------------------
+def border_all(width, color):
+    if hasattr(ft, "Border") and hasattr(ft.Border, "all"):
+        return ft.Border.all(width, color)
+    return ft.border.all(width, color)
+
+
+def padding_symmetric(horizontal=0, vertical=0):
+    if hasattr(ft, "Padding") and hasattr(ft.Padding, "symmetric"):
+        return ft.Padding.symmetric(horizontal=horizontal, vertical=vertical)
+    return ft.padding.symmetric(horizontal=horizontal, vertical=vertical)
+
 
 # ---------------------------------------------------------------------------
 # API URL & CONFIGURATION
@@ -13,6 +80,47 @@ from flet.matplotlib_chart import MatplotlibChart
 
 BASE_URL = "https://thesis-w4mq.onrender.com"
 WS_URL = "wss://thesis-w4mq.onrender.com/ws/crypto-stream"
+
+
+# ---------------------------------------------------------------------------
+# REAL HISTORICAL PRICES HELPER (BINANCE PUBLIC API + SAFE FALLBACK)
+# ---------------------------------------------------------------------------
+def fetch_historical_prices(symbol, live_price=None, limit=10):
+    pair = f"{symbol}USDT"
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": pair, "interval": "1d", "limit": limit},
+            timeout=10
+        )
+        if r.status_code == 200:
+            closes = [float(candle[4]) for candle in r.json()]
+            if live_price and live_price > 0:
+                closes[-1] = float(live_price)
+            return closes
+    except Exception:
+        pass
+
+    # Fallback γύρω από την πραγματική live τιμή αν δεν απαντήσει η Binance
+    base = float(live_price) if (live_price and live_price > 0) else (74750.0 if symbol == "BTC" else 2125.0)
+    offsets = [-0.018, -0.012, -0.021, -0.015, -0.008, 0.004, -0.003, 0.002, -0.001, 0.0]
+    return [round(base * (1 + o), 2) for o in offsets]
+
+
+# ---------------------------------------------------------------------------
+# MATPLOTLIB TO FLET IMAGE HELPER
+# ---------------------------------------------------------------------------
+def fig_to_flet_image(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+    buf.seek(0)
+    b64_img = base64.b64encode(buf.read()).decode("utf-8")
+    buf.close()
+    plt.close(fig)
+    try:
+        return ft.Image(src_base64=b64_img, fit="contain", expand=True)
+    except TypeError:
+        return ft.Image(src=f"data:image/png;base64,{b64_img}", fit="contain", expand=True)
 
 
 # ---------------------------------------------------------------------------
@@ -26,28 +134,32 @@ def build_horizon_chart(symbol, prices, transformer_pred, lstm_pred, ensemble_pr
     x_hist = list(range(1, len(prices) + 1))
 
     # Ιστορικές Τιμές
-    ax.plot(x_hist, prices, color=color, marker='o', linewidth=2.2, label=f'{symbol} Historical Price')
+    ax.plot(x_hist, prices, color=color, marker='o', markersize=4, linewidth=2.2, label=f'{symbol} Historical')
 
     last_x = len(prices)
     next_x = last_x + 1
     last_y = prices[-1] if prices else 0
 
-    # Προβλέψεις
-    ax.plot([last_x, next_x], [last_y, transformer_pred], color='#3b82f6', linestyle='--', marker='s', linewidth=2, label='Transformer (#1)')
-    ax.plot([last_x, next_x], [last_y, lstm_pred], color='#22c55e' if symbol == 'BTC' else '#c084fc', linestyle='--', marker='^', linewidth=2, label='LSTM (#2)')
-    ax.plot([last_x, next_x], [last_y, ensemble_pred], color='#eab308', marker='*', markersize=10, linewidth=2.5, label='Ensemble Consensus ★')
+    # Προβλέψεις (+24h)
+    ax.plot([last_x, next_x], [last_y, transformer_pred], color='#3b82f6', linestyle='--', marker='s', markersize=5, linewidth=2, label=f'Transformer (${transformer_pred:,.0f})')
+    ax.plot([last_x, next_x], [last_y, lstm_pred], color='#22c55e' if symbol == 'BTC' else '#c084fc', linestyle='--', marker='^', markersize=5, linewidth=2, label=f'LSTM (${lstm_pred:,.0f})')
+    ax.plot([last_x, next_x], [last_y, ensemble_pred], color='#eab308', marker='*', markersize=10, linewidth=2.5, label=f'Ensemble ★ (${ensemble_pred:,.0f})')
 
-    ax.set_title(f"{symbol}/USD Trend, Event Pins & Ensemble Consensus", color='white', fontsize=10, pad=10, weight='bold')
+    # Άξονες & Όρια
+    x_labels = [f"D-{len(prices)-i}" for i in range(1, len(prices))] + ["Now", "+24h"]
+    ax.set_xticks(list(range(1, next_x + 1)))
+    ax.set_xticklabels(x_labels, fontsize=7, color='#8a8f9e')
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, _: f"${val:,.0f}"))
+
+    ax.set_title(f"{symbol}/USD Trend & 24h Ensemble Consensus", color='white', fontsize=10, pad=10, weight='bold')
     ax.tick_params(colors='#8a8f9e', labelsize=8)
     for spine in ax.spines.values():
         spine.set_color('#1e293b')
     ax.grid(True, color='#1e293b', linestyle=':', linewidth=0.8)
-    ax.legend(facecolor='#101217', edgecolor='#1e293b', labelcolor='white', fontsize=7.5, loc='upper left')
+    ax.legend(facecolor='#101217', edgecolor='#1e293b', labelcolor='white', fontsize=7, loc='best')
 
     plt.tight_layout()
-    chart = MatplotlibChart(fig, expand=True)
-    plt.close(fig)
-    return chart
+    return fig_to_flet_image(fig)
 
 
 def build_benchmark_table():
@@ -55,55 +167,60 @@ def build_benchmark_table():
         padding=10,
         bgcolor="#0b0e14",
         border_radius=10,
-        border=ft.border.all(1, "rgba(255, 255, 255, 0.05)"),
+        border=border_all(1, "rgba(255, 255, 255, 0.05)"),
         content=ft.Column([
             ft.Text("🏆 Model Benchmark Evaluation", size=13, weight=ft.FontWeight.BOLD, color="#ffffff"),
-            ft.DataTable(
-                bgcolor="#0b0e14",
-                heading_row_color="#101217",
-                columns=[
-                    ft.DataColumn(ft.Text("Architecture", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
-                    ft.DataColumn(ft.Text("BTC MAPE (%)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
-                    ft.DataColumn(ft.Text("BTC MAE ($)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
-                    ft.DataColumn(ft.Text("ETH MAPE (%)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
-                    ft.DataColumn(ft.Text("ETH MAE ($)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
-                ],
-                rows=[
-                    ft.DataRow(cells=[
-                        ft.DataCell(ft.Text("Weighted Ensemble (Trans 60%...)", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
-                        ft.DataCell(ft.Text("2.24%", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
-                        ft.DataCell(ft.Text("$194.50", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
-                        ft.DataCell(ft.Text("3.10%", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
-                        ft.DataCell(ft.Text("$10.15", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
-                    ]),
-                    ft.DataRow(cells=[
-                        ft.DataCell(ft.Text("Transformer (Attention) 🏆", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("2.51%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$218.02", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("3.37%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$11.06", color="#ffffff", size=11)),
-                    ]),
-                    ft.DataRow(cells=[
-                        ft.DataCell(ft.Text("Advanced LSTM", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("2.82%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$238.24", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("3.74%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$11.92", color="#ffffff", size=11)),
-                    ]),
-                    ft.DataRow(cells=[
-                        ft.DataCell(ft.Text("GRU Model", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("2.89%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$243.28", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("4.15%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$12.86", color="#ffffff", size=11)),
-                    ]),
-                    ft.DataRow(cells=[
-                        ft.DataCell(ft.Text("Random Forest (Regularized)", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("3.00%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$253.43", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("4.56%", color="#ffffff", size=11)),
-                        ft.DataCell(ft.Text("$14.29", color="#ffffff", size=11)),
-                    ]),
+            ft.Row(
+                scroll=ft.ScrollMode.AUTO,
+                controls=[
+                    ft.DataTable(
+                        bgcolor="#0b0e14",
+                        heading_row_color="#101217",
+                        columns=[
+                            ft.DataColumn(ft.Text("Architecture", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
+                            ft.DataColumn(ft.Text("BTC MAPE (%)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
+                            ft.DataColumn(ft.Text("BTC MAE ($)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
+                            ft.DataColumn(ft.Text("ETH MAPE (%)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
+                            ft.DataColumn(ft.Text("ETH MAE ($)", color="#8a8f9e", weight=ft.FontWeight.BOLD, size=11)),
+                        ],
+                        rows=[
+                            ft.DataRow(cells=[
+                                ft.DataCell(ft.Text("Weighted Ensemble (Trans 60%...)", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
+                                ft.DataCell(ft.Text("2.24%", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
+                                ft.DataCell(ft.Text("$194.50", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
+                                ft.DataCell(ft.Text("3.10%", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
+                                ft.DataCell(ft.Text("$10.15", color="#facc15", weight=ft.FontWeight.BOLD, size=11)),
+                            ]),
+                            ft.DataRow(cells=[
+                                ft.DataCell(ft.Text("Transformer (Attention) 🏆", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("2.51%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$218.02", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("3.37%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$11.06", color="#ffffff", size=11)),
+                            ]),
+                            ft.DataRow(cells=[
+                                ft.DataCell(ft.Text("Advanced LSTM", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("2.82%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$238.24", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("3.74%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$11.92", color="#ffffff", size=11)),
+                            ]),
+                            ft.DataRow(cells=[
+                                ft.DataCell(ft.Text("GRU Model", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("2.89%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$243.28", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("4.15%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$12.86", color="#ffffff", size=11)),
+                            ]),
+                            ft.DataRow(cells=[
+                                ft.DataCell(ft.Text("Random Forest (Regularized)", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("3.00%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$253.43", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("4.56%", color="#ffffff", size=11)),
+                                ft.DataCell(ft.Text("$14.29", color="#ffffff", size=11)),
+                            ]),
+                        ]
+                    )
                 ]
             )
         ])
@@ -138,8 +255,7 @@ def build_correlation_chart():
     ax.legend(facecolor='#101217', edgecolor='#1e293b', labelcolor='white', fontsize=7.5, loc='upper left')
 
     plt.tight_layout()
-    chart = MatplotlibChart(fig, expand=True)
-    plt.close(fig)
+    chart = fig_to_flet_image(fig)
 
     note_widget = ft.Row([
         ft.Text("📌 Η στατιστική ανάλυση αποδεικνύει ότι η μέγιστη επίδραση των ειδήσεων υψηλού αντικτύπου (Peak Impact) αποτυπώνεται στις τιμές 24 ώρες μετά τη δημοσίευση.", size=11, color="#22c55e", weight=ft.FontWeight.W_500)
@@ -167,6 +283,7 @@ def main(page: ft.Page):
     raw_news = []
     active_ner_filter = None
     is_syncing = False
+    active_tab_index = 0
 
     # UI Components Reference
     ws_status_icon = ft.Icon(ft.Icons.CELL_TOWER, color="#f59e0b", size=14)
@@ -221,6 +338,57 @@ def main(page: ft.Page):
     )
 
     # -----------------------------------------------------------------------
+    # CUSTOM ANALYTICS TABS (100% FLET VERSION INDEPENDENT)
+    # -----------------------------------------------------------------------
+    tab_definitions = [
+        ("Bitcoin Horizon", ft.Icons.SHOW_CHART, btc_chart_container),
+        ("Ethereum Horizon", ft.Icons.TIMELINE, eth_chart_container),
+        ("Model Benchmark", ft.Icons.EMOJI_EVENTS, benchmark_container),
+        ("Lagged Correlation", ft.Icons.QUERY_STATS, correlation_container),
+    ]
+
+    tab_bar_row = ft.Row(scroll=ft.ScrollMode.AUTO, spacing=6)
+    tab_content_host = ft.Container(content=btc_chart_container, height=340)
+
+    def render_tabs():
+        tab_bar_row.controls.clear()
+        for idx, (label, icon, content_ctrl) in enumerate(tab_definitions):
+            is_selected = idx == active_tab_index
+            tab_bar_row.controls.append(
+                ft.Container(
+                    content=ft.Row(
+                        spacing=5,
+                        controls=[
+                            ft.Icon(icon, size=14, color="#0f172a" if is_selected else "#8a8f9e"),
+                            ft.Text(label, size=11, weight=ft.FontWeight.BOLD, color="#0f172a" if is_selected else "#f7f8f8"),
+                        ]
+                    ),
+                    bgcolor="#38bdf8" if is_selected else "#101217",
+                    border=border_all(1, "#38bdf8" if is_selected else "rgba(255, 255, 255, 0.08)"),
+                    padding=padding_symmetric(horizontal=10, vertical=8),
+                    border_radius=8,
+                    on_click=lambda _, i=idx: select_tab(i)
+                )
+            )
+        tab_content_host.content = tab_definitions[active_tab_index][2]
+
+    def select_tab(idx):
+        nonlocal active_tab_index
+        active_tab_index = idx
+        render_tabs()
+        page.update()
+
+    render_tabs()
+
+    analytics_tabs = ft.Column(
+        spacing=10,
+        controls=[
+            tab_bar_row,
+            tab_content_host
+        ]
+    )
+
+    # -----------------------------------------------------------------------
     # API FETCH & RENDER WAKE-UP LOGIC (ASYNC - NON BLOCKING)
     # -----------------------------------------------------------------------
     async def fetch_all_data(e=None):
@@ -250,16 +418,22 @@ def main(page: ft.Page):
             res_p = await asyncio.to_thread(requests.get, f"{BASE_URL}/api/predict-live", timeout=25)
             res_n = await asyncio.to_thread(requests.get, f"{BASE_URL}/api/live-news", timeout=25)
 
+            btc_live_price = None
+            eth_live_price = None
+
             if res_m.status_code == 200:
                 m = res_m.json()
                 btc = m.get("bitcoin", {})
                 eth = m.get("ethereum", {})
                 fng = m.get("market_sentiment", {})
 
-                btc_price_lbl.value = f"${btc.get('close_price', 0.0):,.2f}"
+                btc_live_price = btc.get('close_price', 0.0)
+                eth_live_price = eth.get('close_price', 0.0)
+
+                btc_price_lbl.value = f"${btc_live_price:,.2f}"
                 btc_change_lbl.value = f"24h: {btc.get('change_pct', 0.0):+.2f}%"
 
-                eth_price_lbl.value = f"${eth.get('close_price', 0.0):,.2f}"
+                eth_price_lbl.value = f"${eth_live_price:,.2f}"
                 eth_change_lbl.value = f"24h: {eth.get('change_pct', 0.0):+.2f}%"
 
                 fng_lbl.value = f"{fng.get('fear_greed_index', 50)}/100"
@@ -301,14 +475,15 @@ def main(page: ft.Page):
                 eth_ens_lbl.value = f"${en_eth_val:,.2f}"
                 eth_ens_sub.value = f"{en_eth.get('ETH_signal', '')} | Conf: {en_eth.get('ETH_confidence', '')}"
 
-                # Ενημέρωση Διαγραμμάτων
+                # Ανάκτηση πραγματικών ιστορικών τιμών & ενημέρωση διαγραμμάτων
+                btc_hist = await asyncio.to_thread(fetch_historical_prices, "BTC", btc_live_price, 10)
+                eth_hist = await asyncio.to_thread(fetch_historical_prices, "ETH", eth_live_price, 10)
+
                 btc_chart_container.content = build_horizon_chart(
-                    "BTC", [74300, 74450, 73400, 73380, 74200, 75100, 74900, 74750],
-                    tr_btc_val, ls_btc_val, en_btc_val
+                    "BTC", btc_hist, tr_btc_val, ls_btc_val, en_btc_val
                 )
                 eth_chart_container.content = build_horizon_chart(
-                    "ETH", [2095, 2065, 2050, 2068, 2105, 2135, 2130, 2085, 2125],
-                    tr_eth_val, ls_eth_val, en_eth_val
+                    "ETH", eth_hist, tr_eth_val, ls_eth_val, en_eth_val
                 )
 
             if res_n.status_code == 200:
@@ -350,7 +525,7 @@ def main(page: ft.Page):
             ft.Container(
                 content=ft.Text("#ALL", size=11, weight=ft.FontWeight.BOLD, color="#0f172a" if is_all else "#38bdf8"),
                 bgcolor="#38bdf8" if is_all else "#1e293b",
-                padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                padding=padding_symmetric(horizontal=10, vertical=4),
                 border_radius=10,
                 on_click=lambda _: set_ner_filter(None)
             )
@@ -362,7 +537,7 @@ def main(page: ft.Page):
                 ft.Container(
                     content=ft.Text(f"#{ent}", size=11, weight=ft.FontWeight.BOLD, color="#0f172a" if is_act else "#38bdf8"),
                     bgcolor="#38bdf8" if is_act else "#1e293b",
-                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                    padding=padding_symmetric(horizontal=10, vertical=4),
                     border_radius=10,
                     on_click=lambda _, e=ent: set_ner_filter(e)
                 )
@@ -383,7 +558,7 @@ def main(page: ft.Page):
                 ft.Container(
                     content=ft.Text(f"#{e}", size=9, color="#38bdf8", weight=ft.FontWeight.W_600),
                     bgcolor="#0f172a",
-                    padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                    padding=padding_symmetric(horizontal=6, vertical=2),
                     border_radius=6
                 ) for e in entities
             ]
@@ -392,7 +567,7 @@ def main(page: ft.Page):
                 padding=12,
                 bgcolor="#101217",
                 border_radius=10,
-                border=ft.border.all(1, "rgba(255, 255, 255, 0.05)"),
+                border=border_all(1, "rgba(255, 255, 255, 0.05)"),
                 content=ft.Column(
                     spacing=6,
                     controls=[
@@ -402,7 +577,7 @@ def main(page: ft.Page):
                                 ft.Container(
                                     content=ft.Text(topic_label, size=9, weight=ft.FontWeight.BOLD, color="#ffffff"),
                                     bgcolor=topic_color,
-                                    padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                                    padding=padding_symmetric(horizontal=6, vertical=2),
                                     border_radius=4
                                 ),
                                 ft.Text(f"{item.get('asset', '')} • {item.get('time', '')}", size=10, color="#8a8f9e")
@@ -468,7 +643,7 @@ def main(page: ft.Page):
             padding=14,
             bgcolor="#101217",
             border_radius=12,
-            border=ft.border.all(1, accent_border),
+            border=border_all(1, accent_border),
             content=ft.Column(
                 spacing=4,
                 controls=[
@@ -545,34 +720,6 @@ def main(page: ft.Page):
                 accent_border="#eab308"
             ),
         ]
-    )
-
-    analytics_tabs = ft.Tabs(
-        selected_index=0,
-        animation_duration=300,
-        tabs=[
-            ft.Tab(
-                text="Bitcoin Horizon",
-                icon=ft.Icons.SHOW_CHART,
-                content=btc_chart_container
-            ),
-            ft.Tab(
-                text="Ethereum Horizon",
-                icon=ft.Icons.TIMELINE,
-                content=eth_chart_container
-            ),
-            ft.Tab(
-                text="Model Benchmark",
-                icon=ft.Icons.EMOJI_EVENTS,
-                content=benchmark_container
-            ),
-            ft.Tab(
-                text="Lagged Correlation",
-                icon=ft.Icons.QUERY_STATS,
-                content=correlation_container
-            ),
-        ],
-        height=400
     )
 
     news_section = ft.Column(

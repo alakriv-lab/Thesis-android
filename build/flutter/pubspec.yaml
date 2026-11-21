@@ -21,6 +21,6 @@ environment:
   sdk: '>=3.1.5 <4.0.0'
 flutter:
   uses-material-design: true
-name: crypto_thesis_project_android
+name: cryptoai
 publish_to: none
 version: 1.0.0+1

@@ -1,14 +1,14 @@
-# Crypto_thesis_project android
+# CryptoAI
 
 
 
 ## Template variables
 
-* `crypto_thesis_project_android` - project identifier (lowercase, no spaces, i.e. "snake_case") used for bundle IDs and package names.
+* `cryptoai` - project identifier (lowercase, no spaces, i.e. "snake_case") used for bundle IDs and package names.
 * `` - project description.
-* `Crypto_thesis_project android` - executable or bundle name on disk.
-* `Crypto_thesis_project android` - display name shown in window titles and about app dialogs.
-* `com.flet` - org name in reverse domain name notation, e.g. `com.mycompany.myproject`.
+* `CryptoAI` - executable or bundle name on disk.
+* `CryptoAI` - display name shown in window titles and about app dialogs.
+* `com.alakriv.cryptoai` - org name in reverse domain name notation, e.g. `com.mycompany.myproject`.
 * `Your Company` - the name of the company.
 * `` - the copyright notice.
 

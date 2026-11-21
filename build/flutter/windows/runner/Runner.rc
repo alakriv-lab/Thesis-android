@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "Your Company" "\0"
-            VALUE "FileDescription", "Crypto_thesis_project android" "\0"
+            VALUE "FileDescription", "CryptoAI" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "Crypto_thesis_project android" "\0"
+            VALUE "InternalName", "CryptoAI" "\0"
             VALUE "LegalCopyright", "" "\0"
-            VALUE "OriginalFilename", "Crypto_thesis_project android.exe" "\0"
-            VALUE "ProductName", "Crypto_thesis_project android" "\0"
+            VALUE "OriginalFilename", "CryptoAI.exe" "\0"
+            VALUE "ProductName", "CryptoAI" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

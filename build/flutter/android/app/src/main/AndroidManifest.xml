@@ -11,7 +11,7 @@
     <!-- flet: end of feature  -->
 
     <application
-        android:label="Crypto_thesis_project android"
+        android:label="CryptoAI"
         android:name="${applicationName}"
         android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher">
