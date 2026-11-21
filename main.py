@@ -21,13 +21,13 @@ WS_URL = "wss://thesis-w4mq.onrender.com/ws/crypto-stream"
 def build_horizon_chart(symbol, prices, transformer_pred, lstm_pred, ensemble_pred):
     fig, ax = plt.subplots(figsize=(6, 3.2), facecolor='#0b0e14')
     ax.set_facecolor('#0b0e14')
-    
+
     color = '#f7931a' if symbol == 'BTC' else '#a855f7'
     x_hist = list(range(1, len(prices) + 1))
-    
+
     # Ιστορικές Τιμές
     ax.plot(x_hist, prices, color=color, marker='o', linewidth=2.2, label=f'{symbol} Historical Price')
-    
+
     last_x = len(prices)
     next_x = last_x + 1
     last_y = prices[-1] if prices else 0
@@ -43,7 +43,7 @@ def build_horizon_chart(symbol, prices, transformer_pred, lstm_pred, ensemble_pr
         spine.set_color('#1e293b')
     ax.grid(True, color='#1e293b', linestyle=':', linewidth=0.8)
     ax.legend(facecolor='#101217', edgecolor='#1e293b', labelcolor='white', fontsize=7.5, loc='upper left')
-    
+
     plt.tight_layout()
     chart = MatplotlibChart(fig, expand=True)
     plt.close(fig)
@@ -113,7 +113,7 @@ def build_benchmark_table():
 def build_correlation_chart():
     fig, ax = plt.subplots(figsize=(6, 3.2), facecolor='#0b0e14')
     ax.set_facecolor('#0b0e14')
-    
+
     lags = [0, 1, 2, 3, 4, 5]
     btc_corr = [0.42, 0.68, 0.51, 0.28, 0.14, 0.05]
     eth_corr = [0.38, 0.60, 0.49, 0.25, 0.11, 0.02]
@@ -157,7 +157,7 @@ def main(page: ft.Page):
     page.bgcolor = "#08090a"
     page.padding = 16
     page.scroll = ft.ScrollMode.AUTO
-    
+
     page.window.width = 420
     page.window.height = 800
 
@@ -166,22 +166,24 @@ def main(page: ft.Page):
     # -----------------------------------------------------------------------
     raw_news = []
     active_ner_filter = None
+    is_syncing = False
 
     # UI Components Reference
     ws_status_icon = ft.Icon(ft.Icons.CELL_TOWER, color="#f59e0b", size=14)
     ws_status_text = ft.Text("Connecting WebSocket...", size=11, color="#f59e0b", weight=ft.FontWeight.W_600)
+    sync_status_text = ft.Text("Ready to sync", size=11, color="#8a8f9e", weight=ft.FontWeight.W_500)
 
     # Spot Price Widgets
     btc_price_lbl = ft.Text("$0.00", size=22, weight=ft.FontWeight.BOLD, color="#f7f8f8")
     btc_change_lbl = ft.Text("24h: 0.00%", size=12, color="#8a8f9e")
-    
+
     eth_price_lbl = ft.Text("$0.00", size=22, weight=ft.FontWeight.BOLD, color="#a855f7")
     eth_change_lbl = ft.Text("24h: 0.00%", size=12, color="#8a8f9e")
 
     # Macro Sentiment Widgets
     fng_lbl = ft.Text("-", size=18, weight=ft.FontWeight.BOLD, color="#facc15")
     fng_sub_lbl = ft.Text("Sentiment: -", size=11, color="#8a8f9e")
-    
+
     sent_lbl = ft.Text("-", size=18, weight=ft.FontWeight.BOLD, color="#5e6ad2")
     sent_sub_lbl = ft.Text("NLP: -", size=11, color="#8a8f9e")
 
@@ -219,14 +221,34 @@ def main(page: ft.Page):
     )
 
     # -----------------------------------------------------------------------
-    # API FETCH LOGIC
+    # API FETCH & RENDER WAKE-UP LOGIC (ASYNC - NON BLOCKING)
     # -----------------------------------------------------------------------
-    def fetch_all_data(e=None):
-        nonlocal raw_news
+    async def fetch_all_data(e=None):
+        nonlocal raw_news, is_syncing
+        if is_syncing:
+            return
+
+        is_syncing = True
+        sync_btn.disabled = True
+        sync_btn.icon_color = "#f59e0b"
+        sync_status_text.value = "⏳ Waking up Render backend (έως 60s)..."
+        sync_status_text.color = "#f59e0b"
+        page.update()
+
         try:
-            res_m = requests.get(f"{BASE_URL}/api/live-metrics", timeout=4)
-            res_p = requests.get(f"{BASE_URL}/api/predict-live", timeout=4)
-            res_n = requests.get(f"{BASE_URL}/api/live-news", timeout=4)
+            # Βήμα 1: Ξύπνημα του Render.com αν είναι σε sleep mode
+            wake_res = await asyncio.to_thread(requests.get, f"{BASE_URL}/", timeout=65)
+            if wake_res.status_code != 200:
+                raise Exception(f"Backend returned status {wake_res.status_code}")
+
+            sync_status_text.value = "🔄 Syncing metrics, AI predictions & news..."
+            sync_status_text.color = "#38bdf8"
+            page.update()
+
+            # Βήμα 2: Ανάκτηση δεδομένων με αυξημένο timeout
+            res_m = await asyncio.to_thread(requests.get, f"{BASE_URL}/api/live-metrics", timeout=25)
+            res_p = await asyncio.to_thread(requests.get, f"{BASE_URL}/api/predict-live", timeout=25)
+            res_n = await asyncio.to_thread(requests.get, f"{BASE_URL}/api/live-news", timeout=25)
 
             if res_m.status_code == 200:
                 m = res_m.json()
@@ -236,7 +258,7 @@ def main(page: ft.Page):
 
                 btc_price_lbl.value = f"${btc.get('close_price', 0.0):,.2f}"
                 btc_change_lbl.value = f"24h: {btc.get('change_pct', 0.0):+.2f}%"
-                
+
                 eth_price_lbl.value = f"${eth.get('close_price', 0.0):,.2f}"
                 eth_change_lbl.value = f"24h: {eth.get('change_pct', 0.0):+.2f}%"
 
@@ -281,11 +303,11 @@ def main(page: ft.Page):
 
                 # Ενημέρωση Διαγραμμάτων
                 btc_chart_container.content = build_horizon_chart(
-                    "BTC", [74300, 74450, 73400, 73380, 74200, 75100, 74900, 74750], 
+                    "BTC", [74300, 74450, 73400, 73380, 74200, 75100, 74900, 74750],
                     tr_btc_val, ls_btc_val, en_btc_val
                 )
                 eth_chart_container.content = build_horizon_chart(
-                    "ETH", [2095, 2065, 2050, 2068, 2105, 2135, 2130, 2085, 2125], 
+                    "ETH", [2095, 2065, 2050, 2068, 2105, 2135, 2130, 2085, 2125],
                     tr_eth_val, ls_eth_val, en_eth_val
                 )
 
@@ -294,9 +316,17 @@ def main(page: ft.Page):
                 render_ner_filters()
                 render_news_cards()
 
-            page.update()
+            sync_status_text.value = "✅ Pipeline Synced (Render Online)"
+            sync_status_text.color = "#22c55e"
         except Exception as ex:
             print(f"[!] Error fetching REST API: {ex}")
+            sync_status_text.value = "⚠️ Sync timeout/error — πάτα ξανά Sync"
+            sync_status_text.color = "#ef4444"
+        finally:
+            is_syncing = False
+            sync_btn.disabled = False
+            sync_btn.icon_color = "#5e6ad2"
+            page.update()
 
     # -----------------------------------------------------------------------
     # DYNAMIC NER FILTERING & NEWS FEED
@@ -449,6 +479,13 @@ def main(page: ft.Page):
             )
         )
 
+    sync_btn = ft.IconButton(
+        icon=ft.Icons.SYNC,
+        icon_color="#5e6ad2",
+        on_click=fetch_all_data,
+        tooltip="Sync Pipeline (Wake Up Render)"
+    )
+
     header = ft.Row(
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         controls=[
@@ -456,11 +493,17 @@ def main(page: ft.Page):
                 ft.Text("❖ Crypto AI", size=20, weight=ft.FontWeight.BOLD, color="#f7f8f8"),
                 ft.Text("Linear Mobile Intelligence", size=11, color="#8a8f9e")
             ], spacing=1),
-            ft.IconButton(icon=ft.Icons.SYNC, icon_color="#5e6ad2", on_click=fetch_all_data, tooltip="Sync Pipeline")
+            sync_btn
         ]
     )
 
-    ws_bar = ft.Row(controls=[ws_status_icon, ws_status_text], spacing=6)
+    ws_bar = ft.Column(
+        spacing=2,
+        controls=[
+            ft.Row(controls=[ws_status_icon, ws_status_text], spacing=6),
+            sync_status_text
+        ]
+    )
 
     cards_grid = ft.Column(
         spacing=10,
@@ -552,7 +595,7 @@ def main(page: ft.Page):
         news_section
     )
 
-    fetch_all_data()
+    page.run_task(fetch_all_data)
     page.run_task(binance_ws_task)
 
 
